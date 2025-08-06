@@ -233,7 +233,68 @@ CROSS JOIN PetugasInfo pi;
       console.error('SQL Error (withChecklistByToken):', err);
       res.status(500).json({ message: 'Server error', error: err.message });
     }
-  }
+  },
+
+  status: async (req, res) => {
+    const aparId = parseInt(req.params.aparId, 10);
+    const badge  = (req.query.badge||'').trim().toUpperCase();
+    if (isNaN(aparId) || !badge) {
+      return res.status(400).json({
+        success: false,
+        message: 'Parameter aparId dan badge wajib valid'
+      });
+    }
+
+    try {
+      const pool = await poolPromise;
+      const { recordset } = await pool.request()
+        .input('aparId', sql.Int, aparId)
+        .input('badge',  sql.NVarChar, badge)
+        .query(`
+  WITH PetugasInfo AS (
+    SELECT ip.Bulan AS IntervalPetugasBln
+    FROM Petugas p
+    LEFT JOIN IntervalPetugas ip ON p.IntervalPetugasId = ip.Id
+    WHERE LTRIM(RTRIM(UPPER(p.BadgeNumber))) = @badge
+  ),
+  LastIns AS (
+    SELECT TOP 1 *
+    FROM HasilPemeriksaan
+    WHERE PeralatanId = @aparId
+    ORDER BY TanggalPemeriksaan DESC
+  )
+  SELECT
+    li.Id,
+    li.TanggalPemeriksaan,
+    li.Kondisi,
+    p.Kode                     AS AparKode,
+    l.Nama                     AS LokasiNama,
+    jp.Nama                    AS JenisNama,
+    pi.IntervalPetugasBln      AS kuota_petugas,
+    jp.IntervalPemeriksaanBulan AS interval_default,
+    CASE
+      WHEN pi.IntervalPetugasBln IS NOT NULL
+        THEN DATEADD(MONTH, pi.IntervalPetugasBln, li.TanggalPemeriksaan)
+      ELSE DATEADD(MONTH, jp.IntervalPemeriksaanBulan, li.TanggalPemeriksaan)
+    END                         AS next_due_date
+  FROM LastIns li
+  CROSS JOIN PetugasInfo pi
+  JOIN Peralatan p       ON li.PeralatanId = p.Id
+  JOIN Lokasi l          ON p.LokasiId    = l.Id
+  JOIN JenisPeralatan jp ON p.JenisId     = jp.Id;
+        `);
+
+      res.json({ success: true, data: recordset[0] || null });
+    } catch (err) {
+      console.error('🔥 SQL Error (status):', err);
+      res.status(500).json({
+        success: false,
+        message: 'Gagal mengambil status maintenance',
+        error: err.message
+      });
+    }
+  },
+
 
 };
 

@@ -6,73 +6,89 @@ const { poolPromise, sql } = require('../ConfigDB');
 const { v4: uuidv4 } = require('uuid');
 
 // ─── ROUTE 1: Peralatan dasar (mobile), filter by badge → lokasi kerja petugas ───
+// ─── ROUTE: Daftar peralatan + next due + kuota petugas ─────────────────────────
 router.get('/', async (req, res) => {
+  const badge = (req.query.badge||'').trim().toUpperCase();
+  if (!badge) return res.json([]);
+
   try {
-    let { badge } = req.query;
-    if (typeof badge === 'string') badge = badge.trim().toUpperCase();
-    if (!badge) return res.json([]);
-
     const pool = await poolPromise;
-
-    // Ambil data petugas + interval
-    const petugasRes = await pool.request()
+    const { recordset } = await pool.request()
       .input('badge', sql.NVarChar, badge)
       .query(`
-        SELECT p.Id, p.LokasiId, p.IntervalPetugasId, ip.NamaInterval, ip.Bulan AS IntervalBulan
-        FROM Petugas p
-        LEFT JOIN IntervalPetugas ip ON p.IntervalPetugasId = ip.Id
-        WHERE LTRIM(RTRIM(UPPER(p.BadgeNumber))) = @badge
-      `);
-    if (!petugasRes.recordset.length) return res.json([]);
-    const petugas = petugasRes.recordset[0];
+WITH PetugasInfo AS (
+  SELECT 
+    p.Id           AS PetugasId,
+    p.LokasiId     AS PetugasLokasiId,
+    ip.Bulan       AS IntervalBulanPetugas
+  FROM Petugas p
+  LEFT JOIN IntervalPetugas ip 
+    ON p.IntervalPetugasId = ip.Id
+  WHERE UPPER(LTRIM(RTRIM(p.BadgeNumber))) = @badge
+),
+LastCheck AS (
+  SELECT
+    hp.PeralatanId,
+    hp.TanggalPemeriksaan    AS last_inspection,
+    hp.BadgeNumber           AS badge_petugas,
+    ROW_NUMBER() OVER(
+      PARTITION BY hp.PeralatanId 
+      ORDER BY hp.TanggalPemeriksaan DESC
+    ) AS rn
+  FROM HasilPemeriksaan hp
+),
+InspeksiBlnIni AS (
+  SELECT 
+    hp.BadgeNumber, 
+    COUNT(*) AS TotalInspeksi
+  FROM HasilPemeriksaan hp
+  WHERE 
+    MONTH(hp.TanggalPemeriksaan) = MONTH(GETDATE())
+    AND YEAR(hp.TanggalPemeriksaan) = YEAR(GETDATE())
+  GROUP BY hp.BadgeNumber
+)
+SELECT
+  a.Id                      AS id_apar,
+  a.Kode                    AS no_apar,
+  l.Nama                    AS lokasi_apar,
+  j.Nama                    AS jenis_apar,
+  pi.IntervalBulanPetugas   AS kuota_per_bulan,
+  lc.last_inspection,
+  CASE
+    WHEN lc.last_inspection IS NULL THEN NULL
+    WHEN pi.IntervalBulanPetugas IS NOT NULL
+      THEN DATEADD(MONTH, pi.IntervalBulanPetugas, lc.last_inspection)
+    ELSE DATEADD(MONTH, j.IntervalPemeriksaanBulan, lc.last_inspection)
+  END                        AS next_due_date,
+  lc.badge_petugas,
+  ISNULL(ib.TotalInspeksi, 0)       AS sudah_inspeksi,
+  (pi.IntervalBulanPetugas - ISNULL(ib.TotalInspeksi, 0)) AS sisa_kuota
+FROM Peralatan a
+CROSS JOIN PetugasInfo pi
+LEFT JOIN LastCheck lc 
+  ON lc.PeralatanId = a.Id 
+  AND lc.rn = 1           -- hanya pemeriksaan terakhir
+LEFT JOIN InspeksiBlnIni ib 
+  ON ib.BadgeNumber = @badge
+JOIN JenisPeralatan j 
+  ON a.JenisId = j.Id
+JOIN Lokasi l 
+  ON a.LokasiId = l.Id
+WHERE 
+  a.LokasiId = pi.PetugasLokasiId
+  OR a.LokasiId IN (
+    SELECT Id FROM Lokasi WHERE PIC_PetugasId = pi.PetugasId
+  )
+ORDER BY a.Kode;
 
-    // 🚩 Peralatan + last maintenance (petugas)
-    const result = await pool.request()
-      .input('PetugasId', sql.Int, petugas.Id)
-      .input('PetugasLokasiId', sql.Int, petugas.LokasiId)
-      .input('IntervalBulan', sql.Int, petugas.IntervalBulan)
-      .query(`
-        WITH LastCheck AS (
-          SELECT PeralatanId, MAX(TanggalPemeriksaan) AS TglTerakhir
-          FROM HasilPemeriksaan GROUP BY PeralatanId
-        )
-        SELECT
-          alat.Id AS id_apar,
-          alat.Kode AS no_apar,
-          lokasi.Nama AS lokasi_apar,
-          jenis.Nama AS jenis_apar,
-          COALESCE(lastcheck.TglTerakhir, NULL) AS tgl_terakhir_maintenance,
-          hasil.BadgeNumber AS last_petugas_badge,
-          CASE WHEN lastcheck.TglTerakhir IS NULL THEN 'Belum' ELSE 'Sudah' END AS statusMaintenance,
-          CASE
-            WHEN lastcheck.TglTerakhir IS NULL THEN NULL
-            WHEN @IntervalBulan IS NOT NULL THEN DATEADD(MONTH, @IntervalBulan, lastcheck.TglTerakhir)
-            ELSE DATEADD(MONTH, jenis.IntervalPemeriksaanBulan, lastcheck.TglTerakhir)
-          END AS nextDueDate,
-          COALESCE(@IntervalBulan, jenis.IntervalPemeriksaanBulan) * 30 AS interval_maintenance,
-          @IntervalBulan AS interval_bulan_petugas,
-          jenis.IntervalPemeriksaanBulan AS interval_bulan_default_jenis
-        FROM Peralatan alat
-        JOIN JenisPeralatan jenis ON alat.JenisId = jenis.Id
-        JOIN Lokasi lokasi ON alat.LokasiId = lokasi.Id
-        LEFT JOIN LastCheck lastcheck ON alat.Id = lastcheck.PeralatanId
-        LEFT JOIN HasilPemeriksaan hasil
-          ON alat.Id = hasil.PeralatanId AND hasil.TanggalPemeriksaan = lastcheck.TglTerakhir
-        WHERE
-          (alat.LokasiId = @PetugasLokasiId
-           OR alat.LokasiId IN (SELECT Id FROM Lokasi WHERE PIC_PetugasId = @PetugasId))
-        ORDER BY alat.Kode;
       `);
 
-    res.json(result.recordset);
+    res.json(recordset);
   } catch (err) {
     console.error('🔥 SQL Error (peralatan):', err);
-    res.json([]);
+    res.status(500).json({ message: 'Gagal load peralatan' });
   }
 });
-
-
-
 
 
 // ─── ROUTE 1B: ENHANCED VERSION ───────────────────────────────────────────────────
@@ -173,9 +189,6 @@ router.get('/with-checklist', async (req, res) => {
     res.status(500).json({ message: 'Server error' });
   }
 });
-
-
-
 
 // ─── ROUTE 3: List peralatan untuk WEB ADMIN ───────────────────────────────────────
 router.get('/admin', async (req, res) => {

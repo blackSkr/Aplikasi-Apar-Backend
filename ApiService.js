@@ -10,9 +10,13 @@ const app = express();
 // =======================
 // Middleware
 // =======================
+// 1. Parse JSON bodies
 app.use(bodyParser.json());
+// 2. Parse URL-encoded bodies (dari <form method="post">…</form>)
 app.use(bodyParser.urlencoded({ extended: true }));
+// 3. Override HTTP methods via query/value _method (untuk PUT/DELETE lewat form)
 app.use(methodOverride('_method'));
+// 4. Enable CORS
 app.use(cors());
 
 // =======================
@@ -27,8 +31,8 @@ app.get('/', (req, res) => {
 });
 
 app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
+  res.json({ 
+    status: 'OK', 
     timestamp: new Date().toISOString()
   });
 });
@@ -57,7 +61,8 @@ const routes = [
   { path: './routes/PetugasRoutes',         routePath: '/api/petugas',         name: 'PetugasRoutes' },
   { path: './routes/ChecklistRoutes',       routePath: '/api/checklist',       name: 'ChecklistRoutes' },
   { path: './routes/IntervalPetugasRoutes', routePath: '/api/interval-petugas',name: 'IntervalPetugasRoutes' },
-  // Tambahan lainnya bisa diaktifkan bila dibutuhkan
+  // { path: './routes/DropdownRoutes',        routePath: '/api/dropdown',       name: 'DropdownRoutes' }
+
 ];
 
 let successCount = 0;
@@ -69,18 +74,9 @@ routes.forEach(route => {
 console.log(`\n📊 Routes loaded: ${successCount}/${routes.length}`);
 
 // =======================
-// Start Server
+// Mulai Server
 // =======================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
-
-// =======================
-// ready to deploy
-// =======================
-// const URL = 'http://172.16.34.189:3000';
-
-// app.listen(PORT, () => {
-//   console.log(`🚀 Server running on ${URL}`);
-// });
