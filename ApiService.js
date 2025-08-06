@@ -75,3 +75,12 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
+
+// =======================
+// ready to deploy
+// =======================
+// const URL = 'http://172.16.34.189:3000';
+
+// app.listen(PORT, () => {
+//   console.log(`🚀 Server running on ${URL}`);
+// });
