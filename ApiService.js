@@ -77,6 +77,7 @@ console.log(`\n📊 Routes loaded: ${successCount}/${routes.length}`);
 // Mulai Server
 // =======================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+const HOST = '0.0.0.0'; // supaya bisa diakses dari HP di LAN
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 Server running on http://${HOST}:${PORT}`);
 });
