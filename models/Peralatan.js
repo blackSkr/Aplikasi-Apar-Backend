@@ -5,7 +5,7 @@ const PeralatanModel = {
   async getAll() {
     const pool = await poolPromise;
     const result = await pool.request().query(`
-      SELECT p.Id, p.Kode, jp.Nama AS Jenis, l.Nama AS Lokasi, p.Spesifikasi
+      SELECT p.Id, p.Kode, jp.Nama AS Jenis, l.Nama AS Lokasi, p.Spesifikasi, p.FotoPath
       FROM Peralatan p
       JOIN JenisPeralatan jp ON p.JenisId = jp.Id
       JOIN Lokasi l ON p.LokasiId = l.Id
@@ -17,7 +17,7 @@ const PeralatanModel = {
     const pool = await poolPromise;
     const result = await pool.request().query(`
       SELECT 
-        p.Id, p.Kode, p.Spesifikasi,
+        p.Id, p.Kode, p.Spesifikasi, p.FotoPath,
         l.Nama AS Lokasi, jp.Nama AS Jenis,
         h.Kondisi, h.TanggalPemeriksaan
       FROM Peralatan p
@@ -32,7 +32,6 @@ const PeralatanModel = {
     if (!data.Kode || !data.JenisId || !data.LokasiId || !data.Spesifikasi) {
       throw new Error('Field wajib tidak boleh kosong');
     }
-
     const pool = await poolPromise;
     await pool.request()
       .input('Kode', sql.NVarChar, data.Kode)
@@ -40,11 +39,13 @@ const PeralatanModel = {
       .input('LokasiId', sql.Int, data.LokasiId)
       .input('Spesifikasi', sql.NVarChar, data.Spesifikasi)
       .input('TokenQR', sql.UniqueIdentifier, data.TokenQR)
+      .input('FotoPath', sql.NVarChar, data.FotoPath || null) // NEW
       .query(`
-        INSERT INTO Peralatan (Kode, JenisId, LokasiId, Spesifikasi, TokenQR)
-        VALUES (@Kode, @JenisId, @LokasiId, @Spesifikasi, @TokenQR)
+        INSERT INTO Peralatan (Kode, JenisId, LokasiId, Spesifikasi, TokenQR, FotoPath)
+        VALUES (@Kode, @JenisId, @LokasiId, @Spesifikasi, @TokenQR, @FotoPath)
       `);
   },
+
   async getByTokenQR(tokenQR) {
     const pool = await poolPromise;
     const result = await pool.request()
@@ -52,7 +53,6 @@ const PeralatanModel = {
       .query('SELECT * FROM Peralatan WHERE TokenQR = @TokenQR');
     return result.recordset[0];
   }
-
 };
 
 module.exports = PeralatanModel;

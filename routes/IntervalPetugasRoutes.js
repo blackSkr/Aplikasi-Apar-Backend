@@ -3,22 +3,28 @@ const express = require('express');
 const router = express.Router();
 const { poolPromise, sql } = require('../ConfigDB');
 
-// GET - Semua interval petugas
-router.get('/', async (req, res) => {
+// GET - Semua interval petugas (plus RolesCount)
+router.get('/', async (_req, res) => {
   try {
     const pool = await poolPromise;
     const result = await pool.request()
       .query(`
         SELECT 
-          Id, 
-          NamaInterval, 
-          Bulan,
+          i.Id, 
+          i.NamaInterval, 
+          i.Bulan,
           CASE 
-            WHEN Bulan = 0 THEN 'Interval Khusus'
-            ELSE CONCAT('Setiap ', Bulan, ' bulan')
-          END as Deskripsi
-        FROM IntervalPetugas 
-        ORDER BY Bulan ASC, NamaInterval ASC
+            WHEN i.Bulan = 0 THEN 'Interval Khusus'
+            ELSE CONCAT('Setiap ', i.Bulan, ' bulan')
+          END as Deskripsi,
+          ISNULL(rc.RolesCount, 0) AS RolesCount
+        FROM IntervalPetugas i
+        OUTER APPLY (
+          SELECT COUNT(1) AS RolesCount
+          FROM RolePetugas r
+          WHERE r.IntervalPetugasId = i.Id
+        ) rc
+        ORDER BY i.Bulan ASC, i.NamaInterval ASC
       `);
     
     res.json(result.recordset);
@@ -36,7 +42,18 @@ router.get('/:id', async (req, res) => {
     
     const result = await pool.request()
       .input('id', sql.Int, id)
-      .query('SELECT * FROM IntervalPetugas WHERE Id = @id');
+      .query(`
+        SELECT 
+          i.*,
+          ISNULL(rc.RolesCount, 0) AS RolesCount
+        FROM IntervalPetugas i
+        OUTER APPLY (
+          SELECT COUNT(1) AS RolesCount
+          FROM RolePetugas r
+          WHERE r.IntervalPetugasId = i.Id
+        ) rc
+        WHERE i.Id = @id
+      `);
     
     if (result.recordset.length === 0) {
       return res.status(404).json({ message: 'Interval petugas tidak ditemukan' });
@@ -84,10 +101,21 @@ router.post('/', async (req, res) => {
     
     const newId = result.recordset[0].Id;
     
-    // Return created record
     const newRecord = await pool.request()
       .input('id', sql.Int, newId)
-      .query('SELECT * FROM IntervalPetugas WHERE Id = @id');
+      .query(`
+        SELECT 
+          i.*,
+          CASE WHEN i.Bulan = 0 THEN 'Interval Khusus' ELSE CONCAT('Setiap ', i.Bulan, ' bulan') END AS Deskripsi,
+          ISNULL(rc.RolesCount, 0) AS RolesCount
+        FROM IntervalPetugas i
+        OUTER APPLY (
+          SELECT COUNT(1) AS RolesCount
+          FROM RolePetugas r
+          WHERE r.IntervalPetugasId = i.Id
+        ) rc
+        WHERE i.Id = @id
+      `);
     
     res.status(201).json(newRecord.recordset[0]);
   } catch (err) {
@@ -105,14 +133,12 @@ router.put('/:id', async (req, res) => {
     if (!NamaInterval) {
       return res.status(400).json({ message: 'Nama interval harus diisi' });
     }
-    
     if (Bulan !== null && (Bulan < 0 || Bulan > 12)) {
       return res.status(400).json({ message: 'Bulan harus antara 0-12' });
     }
     
     const pool = await poolPromise;
     
-    // Check if exists
     const checkExist = await pool.request()
       .input('id', sql.Int, id)
       .query('SELECT Id FROM IntervalPetugas WHERE Id = @id');
@@ -121,7 +147,6 @@ router.put('/:id', async (req, res) => {
       return res.status(404).json({ message: 'Interval petugas tidak ditemukan' });
     }
     
-    // Check duplicate name (exclude current)
     const checkDuplicate = await pool.request()
       .input('namaInterval', sql.NVarChar, NamaInterval)
       .input('id', sql.Int, id)
@@ -141,10 +166,21 @@ router.put('/:id', async (req, res) => {
         WHERE Id = @id
       `);
     
-    // Return updated record
     const updatedRecord = await pool.request()
       .input('id', sql.Int, id)
-      .query('SELECT * FROM IntervalPetugas WHERE Id = @id');
+      .query(`
+        SELECT 
+          i.*,
+          CASE WHEN i.Bulan = 0 THEN 'Interval Khusus' ELSE CONCAT('Setiap ', i.Bulan, ' bulan') END AS Deskripsi,
+          ISNULL(rc.RolesCount, 0) AS RolesCount
+        FROM IntervalPetugas i
+        OUTER APPLY (
+          SELECT COUNT(1) AS RolesCount
+          FROM RolePetugas r
+          WHERE r.IntervalPetugasId = i.Id
+        ) rc
+        WHERE i.Id = @id
+      `);
     
     res.json(updatedRecord.recordset[0]);
   } catch (err) {
@@ -159,14 +195,25 @@ router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     const pool = await poolPromise;
     
-    // Check if being used by petugas
-    const checkUsage = await pool.request()
+    // Cek jika dipakai Petugas
+    const checkUsagePetugas = await pool.request()
       .input('id', sql.Int, id)
       .query('SELECT COUNT(*) as count FROM Petugas WHERE IntervalPetugasId = @id');
     
-    if (checkUsage.recordset[0].count > 0) {
+    if (checkUsagePetugas.recordset[0].count > 0) {
       return res.status(400).json({ 
         message: 'Interval petugas tidak dapat dihapus karena sedang digunakan oleh petugas' 
+      });
+    }
+
+    // Cek jika dipakai RolePetugas
+    const checkUsageRole = await pool.request()
+      .input('id', sql.Int, id)
+      .query('SELECT COUNT(*) as count FROM RolePetugas WHERE IntervalPetugasId = @id');
+
+    if (checkUsageRole.recordset[0].count > 0) {
+      return res.status(400).json({
+        message: 'Interval petugas tidak dapat dihapus karena terpasang pada RolePetugas'
       });
     }
     
