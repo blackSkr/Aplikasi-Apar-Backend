@@ -216,6 +216,41 @@ router.get('/lokasi/:badge', async (req, res) => {
 });
 
 // =======================
+// GET BY BADGE (full row dengan join)
+// =======================
+router.get('/by-badge/:badge', async (req, res) => {
+  const raw = req.params.badge ?? '';
+  const badge = String(raw).trim(); // jangan cast ke int, biar leading zero aman
+
+  try {
+    const pool = await poolPromise;
+    const r = await pool.request()
+      .input('badge', sql.NVarChar(50), badge)
+      .query(`
+        SELECT
+          p.Id, p.EmployeeId, p.BadgeNumber, p.RolePetugasId, p.LokasiId,
+          r.NamaRole AS RoleNama, r.IntervalPetugasId,
+          i.NamaInterval AS IntervalNama, i.Bulan AS IntervalBulan,
+          l.Nama AS LokasiNama,
+          e.Nama AS EmployeeNama, e.Divisi AS EmployeeDivisi, e.Departemen AS EmployeeDepartemen
+        FROM Petugas p
+        LEFT JOIN RolePetugas r     ON p.RolePetugasId = r.Id
+        LEFT JOIN IntervalPetugas i ON r.IntervalPetugasId = i.Id
+        LEFT JOIN Lokasi l          ON p.LokasiId = l.Id
+        LEFT JOIN Employee e        ON p.EmployeeId = e.Id
+        WHERE LTRIM(RTRIM(p.BadgeNumber)) = LTRIM(RTRIM(@badge))
+      `);
+
+    if (!r.recordset.length) return res.status(404).json({ message: 'Petugas tidak ditemukan' });
+    return res.json(shapeRow(r.recordset[0]));
+  } catch (err) {
+    console.error('GET /api/petugas/by-badge error', err);
+    return res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+// =======================
 // DETAIL
 // =======================
 router.get('/:id', async (req, res) => {
