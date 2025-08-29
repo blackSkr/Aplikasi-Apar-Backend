@@ -620,6 +620,101 @@ LEFT JOIN LastInspection li ON p.Id = li.PeralatanId;
       return res.status(500).json({ success:false, message:'Server error', error: err.message });
     }
   },
+
+    // ========================= 8) Upcoming (due soon) untuk verifikasi =========================
+  upcoming: async (req, res) => {
+    try {
+      const withinDays = Number.isFinite(parseInt(req.query.withinDays, 10))
+        ? parseInt(req.query.withinDays, 10)
+        : 2; // default H-2
+      const badge    = String(req.query.badge || '').trim();
+      const lokasiId = req.query.lokasiId ? parseInt(req.query.lokasiId, 10) : null;
+      const jenisId  = req.query.jenisId  ? parseInt(req.query.jenisId, 10)  : null;
+      const limit    = req.query.limit    ? parseInt(req.query.limit, 10)    : 200;
+
+      const pool = await poolPromise;
+      const q = await pool.request()
+        .input('Badge',      sql.NVarChar, badge)
+        .input('WithinDays', sql.Int,      withinDays)
+        .input('LokasiId',   sql.Int,      Number.isFinite(lokasiId) ? lokasiId : null)
+        .input('JenisId',    sql.Int,      Number.isFinite(jenisId)  ? jenisId  : null)
+        .input('Limit',      sql.Int,      Number.isFinite(limit)    ? limit    : 200)
+        .query(`
+DECLARE @earlyWindow INT = @WithinDays;
+
+WITH PetugasScope AS (
+  SELECT TOP 1
+    t.Id            AS PetugasId,
+    LTRIM(RTRIM(t.BadgeNumber)) AS Badge,
+    t.LokasiId      AS PetugasLokasiId,
+    rp.Id           AS RolePetugasId,
+    LOWER(COALESCE(rp.NamaRole, '')) AS NamaRole,
+    rp.IntervalPetugasId,
+    ip.NamaInterval AS NamaIntervalPetugas,
+    ip.Bulan        AS BulanIntervalPetugas
+  FROM Petugas t
+  LEFT JOIN RolePetugas rp     ON rp.Id = t.RolePetugasId
+  LEFT JOIN IntervalPetugas ip ON ip.Id = rp.IntervalPetugasId
+  WHERE (@Badge = '' OR LTRIM(RTRIM(t.BadgeNumber)) = @Badge)
+),
+Lasts AS (
+  SELECT hp.PeralatanId, MAX(hp.TanggalPemeriksaan) AS LastDate
+  FROM HasilPemeriksaan hp
+  GROUP BY hp.PeralatanId
+),
+Base AS (
+  SELECT
+    p.Id   AS PeralatanId,
+    p.Kode,
+    p.TokenQR,
+    l.Nama AS LokasiNama,
+    jp.Nama AS JenisNama,
+    jp.IntervalPemeriksaanBulan,
+    li.LastDate,
+    COALESCE(ps.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan) AS EffectiveIntervalBulan,
+    CASE 
+      WHEN li.LastDate IS NULL THEN NULL
+      ELSE DATEADD(MONTH, COALESCE(ps.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan), li.LastDate)
+    END AS NextDueDate,
+    CASE 
+      WHEN li.LastDate IS NULL THEN 0
+      ELSE DATEDIFF(DAY, GETDATE(), DATEADD(MONTH, COALESCE(ps.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan), li.LastDate))
+    END AS DueInDays
+  FROM Peralatan p
+  JOIN JenisPeralatan jp ON jp.Id = p.JenisId
+  JOIN Lokasi l          ON l.Id  = p.LokasiId
+  LEFT JOIN Lasts li     ON li.PeralatanId = p.Id
+  LEFT JOIN PetugasScope ps ON 1 = 1
+  WHERE
+    (@LokasiId IS NULL OR p.LokasiId = @LokasiId)
+    AND (@JenisId  IS NULL OR p.JenisId  = @JenisId)
+    -- Batasi visibilitas bila badge non-rescue punya LokasiId
+    AND (
+      @Badge = '' 
+      OR ps.NamaRole = 'rescue'
+      OR ps.PetugasLokasiId IS NULL
+      OR p.LokasiId = ps.PetugasLokasiId
+    )
+)
+SELECT TOP (@Limit)
+  PeralatanId, Kode, LokasiNama, JenisNama, TokenQR,
+  LastDate AS LastInspectionAt,
+  EffectiveIntervalBulan,
+  NextDueDate,
+  DueInDays,
+  CASE WHEN DueInDays < 0 THEN 1 ELSE 0 END AS IsOverdue
+FROM Base
+WHERE DueInDays <= @earlyWindow
+ORDER BY DueInDays ASC, NextDueDate ASC, LokasiNama ASC, Kode ASC;
+        `);
+
+      return res.json({ success: true, data: q.recordset });
+    } catch (err) {
+      console.error('upcoming error', err);
+      return res.status(500).json({ success:false, message:'Server error', error: err.message });
+    }
+  },
+
 };
 
 module.exports = PerawatanController;

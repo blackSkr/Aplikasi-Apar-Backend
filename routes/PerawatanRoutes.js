@@ -100,6 +100,10 @@ router.get('/all',             PerawatanController.all);
 // ambil detail APAR + checklist by token QR (mobile)
 router.get('/with-checklist/by-token', PerawatanController.withChecklistByToken);
 router.get('/with-checklist/by-token-safe', PerawatanController.withChecklistByTokenSafe);
+
+//verifikasi notifikasi
+router.get('/upcoming', PerawatanController.upcoming);
+
 /* ===============================================================
    STATUS-LITE tanpa badge (cocok rescue)
    GET /api/perawatan/status-lite/:aparId
