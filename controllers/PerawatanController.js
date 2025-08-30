@@ -641,10 +641,45 @@ LEFT JOIN LastInspection li ON p.Id = li.PeralatanId;
         .input('Limit',      sql.Int,      Number.isFinite(limit)    ? limit    : 200)
         .query(`
 DECLARE @earlyWindow INT = @WithinDays;
+-- (SQL existing upcoming, biarkan persis punyamu)
+SELECT TOP (@Limit)
+  PeralatanId, Kode, LokasiNama, JenisNama, TokenQR,
+  LastDate AS LastInspectionAt,
+  EffectiveIntervalBulan,
+  NextDueDate,
+  DueInDays,
+  CASE WHEN DueInDays < 0 THEN 1 ELSE 0 END AS IsOverdue
+FROM Base
+WHERE DueInDays <= @earlyWindow
+ORDER BY DueInDays ASC, NextDueDate ASC, LokasiNama ASC, Kode ASC;
+        `);
 
+      return res.json({ success: true, data: q.recordset });
+    } catch (err) {
+      console.error('upcoming error', err);
+      return res.status(500).json({ success:false, message:'Server error', error: err.message });
+    }
+  },
+
+  // ========================= 9) H-2 exact (tepat 2 hari lagi) =========================
+  dueH2: async (req, res) => {
+    try {
+      const badge    = String(req.query.badge || '').trim();
+      const lokasiId = req.query.lokasiId ? parseInt(req.query.lokasiId, 10) : null;
+      const jenisId  = req.query.jenisId  ? parseInt(req.query.jenisId, 10)  : null;
+      const limit    = req.query.limit    ? parseInt(req.query.limit, 10)    : 200;
+
+      const pool = await poolPromise;
+      const q = await pool.request()
+        .input('Badge',    sql.NVarChar, badge)
+        .input('LokasiId', sql.Int, Number.isFinite(lokasiId) ? lokasiId : null)
+        .input('JenisId',  sql.Int, Number.isFinite(jenisId)  ? jenisId  : null)
+        .input('Limit',    sql.Int, Number.isFinite(limit)    ? limit    : 200)
+        .query(`
+/* Gunakan DATEDIFF berbasis 'date' agar akurat H-2 tanpa bias jam */
 WITH PetugasScope AS (
   SELECT TOP 1
-    t.Id            AS PetugasId,
+    t.Id AS PetugasId,
     LTRIM(RTRIM(t.BadgeNumber)) AS Badge,
     t.LokasiId      AS PetugasLokasiId,
     rp.Id           AS RolePetugasId,
@@ -669,17 +704,12 @@ Base AS (
     p.TokenQR,
     l.Nama AS LokasiNama,
     jp.Nama AS JenisNama,
-    jp.IntervalPemeriksaanBulan,
-    li.LastDate,
     COALESCE(ps.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan) AS EffectiveIntervalBulan,
+    li.LastDate,
     CASE 
       WHEN li.LastDate IS NULL THEN NULL
       ELSE DATEADD(MONTH, COALESCE(ps.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan), li.LastDate)
-    END AS NextDueDate,
-    CASE 
-      WHEN li.LastDate IS NULL THEN 0
-      ELSE DATEDIFF(DAY, GETDATE(), DATEADD(MONTH, COALESCE(ps.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan), li.LastDate))
-    END AS DueInDays
+    END AS NextDueDate
   FROM Peralatan p
   JOIN JenisPeralatan jp ON jp.Id = p.JenisId
   JOIN Lokasi l          ON l.Id  = p.LokasiId
@@ -688,7 +718,6 @@ Base AS (
   WHERE
     (@LokasiId IS NULL OR p.LokasiId = @LokasiId)
     AND (@JenisId  IS NULL OR p.JenisId  = @JenisId)
-    -- Batasi visibilitas bila badge non-rescue punya LokasiId
     AND (
       @Badge = '' 
       OR ps.NamaRole = 'rescue'
@@ -698,23 +727,24 @@ Base AS (
 )
 SELECT TOP (@Limit)
   PeralatanId, Kode, LokasiNama, JenisNama, TokenQR,
-  LastDate AS LastInspectionAt,
-  EffectiveIntervalBulan,
   NextDueDate,
-  DueInDays,
-  CASE WHEN DueInDays < 0 THEN 1 ELSE 0 END AS IsOverdue
+  /* Selisih HARI berdasarkan tanggal (bukan jam) */
+  DATEDIFF(DAY, CONVERT(date, GETDATE()), CONVERT(date, NextDueDate)) AS DueInDays,
+  /* Waktu pengingat H-2 jam 09:00 (untuk verifikasi manual) */
+  DATEADD(HOUR, 9, DATEADD(DAY, -2, CONVERT(date, NextDueDate)))      AS H2RemindAt
 FROM Base
-WHERE DueInDays <= @earlyWindow
-ORDER BY DueInDays ASC, NextDueDate ASC, LokasiNama ASC, Kode ASC;
+WHERE NextDueDate IS NOT NULL
+  AND DATEDIFF(DAY, CONVERT(date, GETDATE()), CONVERT(date, NextDueDate)) = 2
+ORDER BY NextDueDate ASC, LokasiNama ASC, Kode ASC;
         `);
 
       return res.json({ success: true, data: q.recordset });
     } catch (err) {
-      console.error('upcoming error', err);
+      console.error('dueH2 error', err);
       return res.status(500).json({ success:false, message:'Server error', error: err.message });
     }
   },
-
 };
 
 module.exports = PerawatanController;
+

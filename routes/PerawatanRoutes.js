@@ -103,6 +103,7 @@ router.get('/with-checklist/by-token-safe', PerawatanController.withChecklistByT
 
 //verifikasi notifikasi
 router.get('/upcoming', PerawatanController.upcoming);
+router.get('/due-h2', PerawatanController.dueH2);
 
 /* ===============================================================
    STATUS-LITE tanpa badge (cocok rescue)
