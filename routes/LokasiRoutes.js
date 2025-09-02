@@ -1,18 +1,14 @@
-// routes/LokasiRoutes.js
 const express = require('express');
 const router  = express.Router();
 const { poolPromise, sql } = require('../ConfigDB');
 
-// Ambil helper dari PetugasRoutes untuk reuse logika (tanpa ubah kontrak lama)
 const petugasHelpers   = require('./PetugasRoutes')._helpers || {};
 const normalizePetugas = petugasHelpers.normalize        || ((b)=>b);
 const resolveEmployee  = petugasHelpers.resolveEmployee  || (async ()=>null);
 const resolveRole      = petugasHelpers.resolveRole      || (async ()=>null);
 const shapePetugasRow  = petugasHelpers.shapeRow         || ((x)=>x);
 
-// =====================
-// ===== Utilities =====
-// =====================
+// =============== Utils ===============
 function toNullableDecimal(val) {
   if (val === undefined || val === null || val === '') return null;
   const num = typeof val === 'string' ? Number(val.replace(',', '.')) : Number(val);
@@ -23,6 +19,7 @@ function shapeLokasiRow(row) {
   return {
     Id:              row.Id,
     Nama:            row.Nama,
+    DetailNamaLokasi: row.DetailNamaLokasi || null, // ✅ kirim camelCase nyaman
     lat:             row.lat,
     long:            row.long,
     PICPetugasId:    row.PICPetugasId,
@@ -37,7 +34,11 @@ async function getLokasiById(pool, id) {
     .input('id', sql.Int, id)
     .query(`
       SELECT
-        l.Id, l.Nama, l.lat, l.long,
+        l.Id,
+        l.Nama,
+        l.[detail_nama_lokasi] AS DetailNamaLokasi, -- ✅ ambil kolom baru
+        l.lat,
+        l.long,
         l.PIC_PetugasId AS PICPetugasId,
         p.BadgeNumber   AS PIC_BadgeNumber,
         rp.NamaRole     AS PIC_Jabatan,
@@ -61,7 +62,6 @@ async function listPetugasInLokasi(pool, lokasiId) {
         p.BadgeNumber,
         p.RolePetugasId,
         p.LokasiId,
-        -- ⬇⬇⬇ FIX PENTING: interval ambil dari Petugas.IntervalPetugasId (bukan Role)
         p.IntervalPetugasId,
         rp.NamaRole AS RoleNama,
         i.NamaInterval,
@@ -81,7 +81,6 @@ async function listPetugasInLokasi(pool, lokasiId) {
   return r.recordset.map(shapePetugasRow);
 }
 
-// Assign existing Petugas ke lokasi (utility dipakai di POST/PUT/POST :id/petugas)
 async function assignExistingPetugasToLokasi(rq, petugasId, lokasiId) {
   await rq
     .input('petugasId', sql.Int, petugasId)
@@ -89,7 +88,6 @@ async function assignExistingPetugasToLokasi(rq, petugasId, lokasiId) {
     .query(`UPDATE Petugas SET LokasiId = @lokasiId WHERE Id = @petugasId;`);
 }
 
-// Pastikan PIC juga ter-assign ke lokasi (sinkronisasi satu arah yang aman)
 async function ensurePICAssignedToLokasi(rq, lokasiId, picId) {
   if (!picId) return;
   await rq
@@ -98,17 +96,17 @@ async function ensurePICAssignedToLokasi(rq, lokasiId, picId) {
     .query(`UPDATE Petugas SET LokasiId = @lokasiId WHERE Id = @pid;`);
 }
 
-// =====================
-// ======== GET ========
-// =====================
-
-// GET all lokasi
+// =============== GET ===============
 router.get('/', async (_req, res) => {
   try {
     const pool   = await poolPromise;
     const result = await pool.request().query(`
       SELECT
-        l.Id, l.Nama, l.lat, l.long,
+        l.Id,
+        l.Nama,
+        l.[detail_nama_lokasi] AS DetailNamaLokasi, -- ✅
+        l.lat,
+        l.long,
         l.PIC_PetugasId AS PICPetugasId,
         p.BadgeNumber   AS PIC_BadgeNumber,
         rp.NamaRole     AS PIC_Jabatan,
@@ -117,7 +115,7 @@ router.get('/', async (_req, res) => {
       LEFT JOIN Petugas     p  ON l.PIC_PetugasId = p.Id
       LEFT JOIN RolePetugas rp ON p.RolePetugasId = rp.Id
       LEFT JOIN Employee    e  ON p.EmployeeId = e.Id
-      ORDER BY l.Nama ASC;
+      ORDER BY l.Nama ASC, l.[detail_nama_lokasi] ASC;
     `);
     res.json(result.recordset.map(shapeLokasiRow));
   } catch (err) {
@@ -126,7 +124,6 @@ router.get('/', async (_req, res) => {
   }
 });
 
-// FORM-META (roles, employees, petugas tanpa lokasi)
 router.get('/form-meta', async (_req, res) => {
   try {
     const pool = await poolPromise;
@@ -163,7 +160,6 @@ router.get('/form-meta', async (_req, res) => {
   }
 });
 
-// GET by ID
 router.get('/:id', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -176,7 +172,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// GET petugas pada lokasi
 router.get('/:id/petugas', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -190,56 +185,54 @@ router.get('/:id/petugas', async (req, res) => {
   }
 });
 
-// =====================
-// ======== POST =======
-// =====================
-
+// =============== POST ===============
 /**
  * POST /api/lokasi
  * Body:
- *  { nama, lat, long, picPetugasId?, petugas?: [{ petugasId, isPIC? } | { employeeId|employeeBadge|badgeNumber, rolePetugasId|roleName, isPIC? }] }
+ *  { nama, detailNamaLokasi?, lat, long, picPetugasId?, petugas?: [...] }
  */
 router.post('/', async (req, res) => {
   const pool = await poolPromise;
   const transaction = new sql.Transaction(pool);
 
   try {
-    const { nama, picPetugasId, petugas } = req.body || {};
+    const { nama, detailNamaLokasi, picPetugasId, petugas } = req.body || {};
     let { lat, long } = req.body || {};
 
     if (!nama) return res.status(400).json({ message: 'Nama lokasi wajib diisi' });
+    const detail = (detailNamaLokasi && String(detailNamaLokasi).trim()) || null;
+
     lat  = toNullableDecimal(lat);
     long = toNullableDecimal(long);
 
     await transaction.begin();
     const rq = new sql.Request(transaction);
 
-    // 1) Insert Lokasi
+    // 1) Insert Lokasi → simpan ke kolom [detail_nama_lokasi]
     const ins = await rq
-      .input('Nama',          sql.NVarChar,       nama)
-      .input('PIC_PetugasId', sql.Int,            picPetugasId || null)
-      .input('lat',           sql.Decimal(10, 6), lat)
-      .input('long',          sql.Decimal(10, 6), long)
+      .input('Nama',                sql.NVarChar,       nama)
+      .input('detail_nama_lokasi', sql.NVarChar,       detail)
+      .input('PIC_PetugasId',      sql.Int,            picPetugasId || null)
+      .input('lat',                sql.Decimal(10, 6), lat)
+      .input('long',               sql.Decimal(10, 6), long)
       .query(`
-        INSERT INTO Lokasi (Nama, PIC_PetugasId, lat, long)
-        VALUES (@Nama, @PIC_PetugasId, @lat, @long);
+        INSERT INTO Lokasi (Nama, [detail_nama_lokasi], PIC_PetugasId, lat, long)
+        VALUES (@Nama, @detail_nama_lokasi, @PIC_PetugasId, @lat, @long);
         SELECT CAST(SCOPE_IDENTITY() AS INT) AS Id;
       `);
     const lokasiId = ins.recordset[0].Id;
 
     let selectedPICId = picPetugasId || null;
 
-    // 2) Opsional proses petugas (link / create+link)
+    // 2) Petugas (tidak diubah)
     if (Array.isArray(petugas) && petugas.length) {
       for (const raw of petugas) {
-        // link-only existing
         if (raw && raw.petugasId) {
           await assignExistingPetugasToLokasi(rq, raw.petugasId, lokasiId);
           if (raw.isPIC) selectedPICId = raw.petugasId;
           continue;
         }
 
-        // create Petugas baru dari Employee + Role
         const p   = normalizePetugas(raw || {});
         const emp = await resolveEmployee(pool, p);
         if (!emp) { const e = new Error('Employee tidak valid (create Lokasi.petugas).'); e.status = 400; throw e; }
@@ -247,7 +240,6 @@ router.post('/', async (req, res) => {
         const role = await resolveRole(pool, p);
         if (!role) { const e = new Error('Role tidak valid (create Lokasi.petugas).'); e.status = 400; throw e; }
 
-        // cegah duplikasi BadgeNumber di tabel Petugas
         const dup = await rq.input('badge', sql.NVarChar, emp.BadgeNumber)
           .query('SELECT 1 FROM Petugas WHERE BadgeNumber = @badge;');
         if (dup.recordset.length) {
@@ -259,7 +251,7 @@ router.post('/', async (req, res) => {
           .input('EmployeeId',        sql.Int,      emp.Id)
           .input('BadgeNumber',       sql.NVarChar, emp.BadgeNumber)
           .input('RolePetugasId',     sql.Int,      role.Id)
-          .input('IntervalPetugasId', sql.Int,      p.IntervalPetugasId || null) // aman bila ada
+          .input('IntervalPetugasId', sql.Int,      p.IntervalPetugasId || null)
           .input('LokasiId',          sql.Int,      lokasiId)
           .query(`
             INSERT INTO Petugas (EmployeeId, BadgeNumber, RolePetugasId, IntervalPetugasId, LokasiId)
@@ -271,13 +263,11 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // 3) Terapkan PIC bila ada override dari array
+    // 3) Atur PIC bila perlu + sinkron LokasiId
     if (selectedPICId && selectedPICId !== picPetugasId) {
       await rq.input('id', sql.Int, lokasiId).input('pic', sql.Int, selectedPICId)
         .query(`UPDATE Lokasi SET PIC_PetugasId = @pic WHERE Id = @id;`);
     }
-
-    // 3b) **Penguatan**: apapun asalnya selectedPICId, pastikan Petugas.LokasiId sinkron
     if (selectedPICId) await ensurePICAssignedToLokasi(rq, lokasiId, selectedPICId);
 
     await transaction.commit();
@@ -294,13 +284,10 @@ router.post('/', async (req, res) => {
   }
 });
 
-// =====================
-// ========= PUT ========
-// =====================
-
+// =============== PUT ===============
 /**
  * PUT /api/lokasi/:id
- * Body sama seperti POST. Tidak menghapus petugas existing; hanya update data lokasi + bisa tambah link petugas.
+ * Body: { nama, detailNamaLokasi?, lat, long, picPetugasId?, petugas?: [...] }
  */
 router.put('/:id', async (req, res) => {
   const pool = await poolPromise;
@@ -308,29 +295,36 @@ router.put('/:id', async (req, res) => {
 
   try {
     const { id } = req.params;
-    const { nama, picPetugasId, petugas } = req.body || {};
+    const { nama, detailNamaLokasi, picPetugasId, petugas } = req.body || {};
     let { lat, long } = req.body || {};
 
     const exist = await pool.request().input('id', sql.Int, id).query('SELECT Id FROM Lokasi WHERE Id = @id;');
     if (!exist.recordset.length) return res.status(404).json({ message: 'Lokasi tidak ditemukan' });
 
     if (!nama) return res.status(400).json({ message: 'Nama lokasi wajib diisi' });
+    const detail = (detailNamaLokasi && String(detailNamaLokasi).trim()) || null;
+
     lat  = toNullableDecimal(lat);
     long = toNullableDecimal(long);
 
     await transaction.begin();
     const rq = new sql.Request(transaction);
 
-    // 1) Update kolom dasar
+    // 1) Update kolom dasar (termasuk detail_nama_lokasi)
     await rq
-      .input('id',             sql.Int,            id)
-      .input('Nama',           sql.NVarChar,       nama)
-      .input('PIC_PetugasId',  sql.Int,            picPetugasId || null)
-      .input('lat',            sql.Decimal(10, 6), lat)
-      .input('long',           sql.Decimal(10, 6), long)
+      .input('id',                 sql.Int,            id)
+      .input('Nama',               sql.NVarChar,       nama)
+      .input('detail_nama_lokasi',sql.NVarChar,       detail)
+      .input('PIC_PetugasId',      sql.Int,            picPetugasId || null)
+      .input('lat',                sql.Decimal(10, 6), lat)
+      .input('long',               sql.Decimal(10, 6), long)
       .query(`
         UPDATE Lokasi
-          SET Nama=@Nama, PIC_PetugasId=@PIC_PetugasId, lat=@lat, long=@long
+          SET Nama=@Nama,
+              [detail_nama_lokasi]=@detail_nama_lokasi,
+              PIC_PetugasId=@PIC_PetugasId,
+              lat=@lat,
+              long=@long
         WHERE Id=@id;
       `);
 
@@ -375,13 +369,11 @@ router.put('/:id', async (req, res) => {
       }
     }
 
-    // 3) Override PIC bila ada flag di array
+    // 3) Override PIC bila perlu + sinkron LokasiId
     if (selectedPICId && selectedPICId !== picPetugasId) {
       await rq.input('id', sql.Int, id).input('pic', sql.Int, selectedPICId)
         .query(`UPDATE Lokasi SET PIC_PetugasId = @pic WHERE Id = @id;`);
     }
-
-    // 3b) **Penguatan**: pastikan Petugas.LokasiId sinkron dengan PIC final
     if (selectedPICId) await ensurePICAssignedToLokasi(rq, id, selectedPICId);
 
     await transaction.commit();
@@ -398,11 +390,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// ===============================
-// === Tambah/Unlink Petugas =====
-// ===============================
-
-// POST /:id/petugas — link existing atau create+link; opsional isPIC
+// =============== Relasi Petugas & Delete (tetap) ===============
 router.post('/:id/petugas', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -452,7 +440,6 @@ router.post('/:id/petugas', async (req, res) => {
       }
     }
 
-    // **Penguatan**: bila PIC di lokasi ini ditetapkan, sinkronkan LokasiId
     const refreshed = await getLokasiById(pool, id);
     if (refreshed?.PICPetugasId) {
       await pool.request()
@@ -470,7 +457,6 @@ router.post('/:id/petugas', async (req, res) => {
   }
 });
 
-// DELETE /:id/petugas/:petugasId — unlink; reset PIC bila perlu
 router.delete('/:id/petugas/:petugasId', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -495,10 +481,6 @@ router.delete('/:id/petugas/:petugasId', async (req, res) => {
   }
 });
 
-// =====================
-// ======= DELETE ======
-// =====================
-
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
@@ -510,7 +492,6 @@ router.delete('/:id', async (req, res) => {
       return res.status(400).json({ message: 'Lokasi tidak dapat dihapus karena masih digunakan oleh peralatan' });
     }
 
-    // Putuskan relasi Petugas agar aman hapus lokasi
     await pool.request().input('id', sql.Int, id)
       .query('UPDATE Petugas SET LokasiId = NULL WHERE LokasiId = @id;');
 
@@ -524,70 +505,6 @@ router.delete('/:id', async (req, res) => {
   } catch (err) {
     console.error('Error delete lokasi:', err);
     res.status(500).json({ message: 'Gagal menghapus lokasi' });
-  }
-});
-
-// ===========================================
-// ====== (BARU) Debug/Helper: mode badge =====
-// ===========================================
-// Non-breaking helper untuk cek cepat apakah badge eligible offline.
-// Tidak wajib dipakai aplikasi; aman dibiarkan.
-router.get('/by-badge/:badge/mode', async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const { badge } = req.params;
-
-    const q = await pool.request()
-      .input('badge', sql.NVarChar, badge)
-      .query(`
-        SELECT
-          p.Id,
-          p.BadgeNumber,
-          p.RolePetugasId,
-          rp.NamaRole,
-          p.LokasiId,
-          l.Nama AS LokasiNama,
-          p.IntervalPetugasId,
-          i.NamaInterval,
-          i.Bulan AS IntervalBulan
-        FROM Petugas p
-        LEFT JOIN RolePetugas     rp ON rp.Id = p.RolePetugasId
-        LEFT JOIN Lokasi           l ON l.Id = p.LokasiId
-        LEFT JOIN IntervalPetugas  i ON i.Id = p.IntervalPetugasId
-        WHERE p.BadgeNumber = @badge;
-      `);
-
-    if (!q.recordset.length) {
-      return res.status(404).json({ message: 'Petugas dengan badge tersebut tidak ditemukan' });
-    }
-
-    const row = q.recordset[0];
-    const roleName = (row.NamaRole || '').toLowerCase();
-    const isRescue = roleName.includes('rescue'); // konsisten dgn aturan app kamu
-
-    // Rule dari konteks proyek:
-    // - Jika role = rescue → offline/online OK (akses penuh)
-    // - Jika role ≠ rescue:
-    //     - bila LokasiId terisi → offline/online OK (dibatasi lokasi)
-    //     - bila LokasiId null → online only
-    const offlineAllowed = isRescue || (!!row.LokasiId);
-
-    res.json({
-      badge: row.BadgeNumber,
-      role: row.NamaRole,
-      lokasiId: row.LokasiId,
-      lokasiNama: row.LokasiNama || null,
-      intervalId: row.IntervalPetugasId || null,
-      intervalNama: row.NamaInterval || null,
-      intervalBulan: row.IntervalBulan || null,
-      mode: offlineAllowed ? 'offline-online' : 'online-only',
-      reason: offlineAllowed
-        ? (isRescue ? 'Role rescue' : 'Petugas memiliki LokasiId')
-        : 'Petugas belum ter-assign ke lokasi (LokasiId NULL)',
-    });
-  } catch (err) {
-    console.error('Error resolve badge mode:', err);
-    res.status(500).json({ message: 'Gagal mengecek mode badge' });
   }
 });
 
