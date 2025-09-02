@@ -317,6 +317,7 @@ ORDER BY hp.TanggalPemeriksaan DESC
             hp.Id, hp.TanggalPemeriksaan, hp.Kondisi,
             hp.CatatanMasalah, hp.Rekomendasi, hp.TindakLanjut,
             hp.Tekanan, hp.JumlahMasalah,
+              hp.Latitude, hp.Longitude,
             hp.BadgeNumber AS PetugasBadge,
             -- sengaja tidak expose Latitude/Longitude agar kontrak lama tetap sama
             pt.Role        AS PetugasRole,
@@ -413,6 +414,7 @@ ORDER BY hp.TanggalPemeriksaan DESC
           hp.Id, hp.TanggalPemeriksaan, hp.Kondisi,
           hp.CatatanMasalah, hp.Rekomendasi, hp.TindakLanjut,
           hp.Tekanan, hp.JumlahMasalah,
+            hp.Latitude, hp.Longitude,
           hp.BadgeNumber AS PetugasBadge,
           -- sengaja tidak expose Latitude/Longitude agar kontrak lama tetap sama
           pt.Role        AS PetugasRole,
