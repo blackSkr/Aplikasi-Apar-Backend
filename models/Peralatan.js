@@ -39,10 +39,11 @@ const PeralatanModel = {
       .input('LokasiId', sql.Int, data.LokasiId)
       .input('Spesifikasi', sql.NVarChar, data.Spesifikasi)
       .input('TokenQR', sql.UniqueIdentifier, data.TokenQR)
-      .input('FotoPath', sql.NVarChar, data.FotoPath || null) // NEW
+      .input('FotoPath', sql.NVarChar, data.FotoPath || null)
+      .input('ExpDate', sql.Date, data.exp_date || null)        // ← baru
       .query(`
-        INSERT INTO Peralatan (Kode, JenisId, LokasiId, Spesifikasi, TokenQR, FotoPath)
-        VALUES (@Kode, @JenisId, @LokasiId, @Spesifikasi, @TokenQR, @FotoPath)
+        INSERT INTO Peralatan (Kode, JenisId, LokasiId, Spesifikasi, TokenQR, FotoPath, exp_date)
+        VALUES (@Kode, @JenisId, @LokasiId, @Spesifikasi, @TokenQR, @FotoPath, @ExpDate)
       `);
   },
 

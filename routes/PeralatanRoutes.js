@@ -233,19 +233,32 @@ WHERE p.Id = @id;
   }
 });
 
-
-/* ==========================================
-   ROUTE 3: List peralatan (WEB ADMIN)
-   ========================================== */
+// ==========================================
+// ROUTE 3: List peralatan (WEB ADMIN)
+// ?hideExp=1  -> sembunyikan yang Exp
+// ?onlyExp=1  -> hanya yang Exp
+// ==========================================
 router.get('/admin', async (req, res) => {
   try {
+    const hideExp = String(req.query.hideExp || '').trim() === '1';
+    const onlyExp = String(req.query.onlyExp || '').trim() === '1';
+
+    const whereExp = onlyExp
+      ? `WHERE (UPPER(LTRIM(RTRIM(p.status))) = 'EXP') 
+              OR (p.exp_date IS NOT NULL AND CAST(p.exp_date AS DATE) < CAST(GETDATE() AS DATE))`
+      : (hideExp ? `WHERE (p.status IS NULL OR UPPER(LTRIM(RTRIM(p.status))) <> 'EXP')
+                         AND (p.exp_date IS NULL OR CAST(p.exp_date AS DATE) >= CAST(GETDATE() AS DATE))`
+                 : ``);
+
     const pool = await poolPromise;
     const result = await pool.request().query(`
       SELECT 
         p.Id, p.Kode, p.Spesifikasi, p.TokenQR, p.FotoPath,
         l.Nama AS LokasiNama, l.Id AS LokasiId,
-        jp.Nama AS JenisNama, jp.Id AS JenisId,
-        jp.IntervalPemeriksaanBulan,
+        l.[detail_nama_lokasi] AS DetailNamaLokasi,                -- ✅ tambahkan
+        jp.Nama AS JenisNama, jp.Id AS JenisId, jp.IntervalPemeriksaanBulan,
+        p.status AS Status, p.tanggal_update_alat AS Tanggal_Update_Alat,
+        p.keterangan AS Keterangan, p.exp_date AS Exp_Date,
         CASE WHEN p.FotoPath IS NULL OR LTRIM(RTRIM(p.FotoPath)) = ''
              THEN '[]'
              ELSE '["' + REPLACE(p.FotoPath, ';', '","') + '"]'
@@ -253,17 +266,14 @@ router.get('/admin', async (req, res) => {
       FROM Peralatan p
       JOIN Lokasi l ON p.LokasiId = l.Id
       JOIN JenisPeralatan jp ON p.JenisId = jp.Id
+      ${whereExp}
       ORDER BY p.Kode
     `);
 
-    // Tambahkan FotoUrls sebagai quality-of-life (tanpa mengubah field lama)
     const withUrls = result.recordset.map(row => {
       let arr = [];
       try { arr = JSON.parse(row.FotoPaths || '[]'); } catch(_) {}
-      return {
-        ...row,
-        FotoUrls: toAbsoluteUrls(req, arr)
-      };
+      return { ...row, FotoUrls: toAbsoluteUrls(req, arr) };
     });
 
     res.json(withUrls);
@@ -272,6 +282,9 @@ router.get('/admin', async (req, res) => {
     res.status(500).json({ message: 'Gagal mengambil data peralatan', error: err.message });
   }
 });
+
+
+
 
 // Get data peralatan untuk sinkron offline
 router.get('/tokens-by-badge/:badge', async (req, res) => {
@@ -304,9 +317,9 @@ router.get('/tokens-by-badge/:badge', async (req, res) => {
 
 
 
-/* ==========================================
-   ROUTE 4: Detail peralatan (WEB ADMIN)
-   ========================================== */
+// ==========================================
+// ROUTE 4: Detail peralatan (WEB ADMIN)
+// ==========================================
 router.get('/admin/:id', async (req, res) => {
   try {
     const idParam = parseInt(req.params.id, 10);
@@ -318,7 +331,10 @@ router.get('/admin/:id', async (req, res) => {
       .query(`
         SELECT 
           p.Id, p.Kode, p.Spesifikasi, p.TokenQR, p.LokasiId, p.JenisId, p.FotoPath,
+          p.status AS Status, p.tanggal_update_alat AS Tanggal_Update_Alat,
+          p.keterangan AS Keterangan, p.exp_date AS Exp_Date,
           l.Nama AS LokasiNama,
+          l.[detail_nama_lokasi] AS DetailNamaLokasi,             -- ✅ tambahkan
           jp.Nama AS JenisNama,
           CASE WHEN p.FotoPath IS NULL OR LTRIM(RTRIM(p.FotoPath)) = ''
                THEN '[]'
@@ -342,6 +358,8 @@ router.get('/admin/:id', async (req, res) => {
     res.status(500).json({ message: 'Gagal mengambil data peralatan' });
   }
 });
+
+
 
 /* ==========================================
    ROUTE 5: Create peralatan (WEB ADMIN)
@@ -377,9 +395,10 @@ router.post('/admin', upload.array('files', 20), async (req, res) => {
       .input('Spesifikasi', sql.NVarChar, Spesifikasi)
       .input('TokenQR', sql.UniqueIdentifier, tokenQR)
       .input('FotoPath', sql.NVarChar, fotoForDb)
+      .input('ExpDate', sql.Date, body.exp_date || null)             // ← baru
       .query(`
-        INSERT INTO Peralatan (Kode, JenisId, LokasiId, Spesifikasi, TokenQR, FotoPath)
-        VALUES (@Kode, @JenisId, @LokasiId, @Spesifikasi, @TokenQR, @FotoPath)
+        INSERT INTO Peralatan (Kode, JenisId, LokasiId, Spesifikasi, TokenQR, FotoPath, exp_date)
+        VALUES (@Kode, @JenisId, @LokasiId, @Spesifikasi, @TokenQR, @FotoPath, @ExpDate)
       `);
 
     res.status(201).json({
@@ -393,6 +412,7 @@ router.post('/admin', upload.array('files', 20), async (req, res) => {
     res.status(500).json({ message: 'Gagal menyimpan peralatan', error: err.message });
   }
 });
+
 
 /* ==========================================
    ROUTE 6: Update peralatan (WEB ADMIN)
@@ -411,6 +431,8 @@ router.put('/admin/:id', upload.array('files', 20), async (req, res) => {
     }
 
     const pool = await poolPromise;
+
+    // Kode unik (kecuali dirinya sendiri)
     const checkExist = await pool.request()
       .input('Kode', sql.NVarChar, Kode)
       .input('id', sql.Int, idParam)
@@ -419,48 +441,101 @@ router.put('/admin/:id', upload.array('files', 20), async (req, res) => {
       return res.status(400).json({ message: 'Kode peralatan sudah digunakan' });
     }
 
+    // ambil data saat ini (untuk deteksi perubahan)
     const cur = await pool.request().input('id', sql.Int, idParam)
-      .query('SELECT FotoPath FROM Peralatan WHERE Id = @id');
+      .query(`
+        SELECT Kode, JenisId, LokasiId, Spesifikasi, FotoPath, exp_date, status, tanggal_update_alat, keterangan
+        FROM Peralatan WHERE Id = @id
+      `);
     if (!cur.recordset.length) return res.status(404).json({ message: 'Peralatan tidak ditemukan' });
-    const current = splitPaths(cur.recordset[0].FotoPath);
 
+    const currentFotoList = (cur.recordset[0].FotoPath || '')
+      .split(';').map(s => s.trim()).filter(Boolean);
+
+    // siapkan daftar foto baru (default: append; replace bila flag true)
     const uploaded = (req.files || []).map(f => `/uploads/peralatan/${f.filename}`);
     const fromBodyArr = Array.isArray(body.FotoPaths) ? body.FotoPaths : [];
     const fromBodySingle = body.FotoPath ? splitPaths(body.FotoPath) : [];
     const isReplace = String(body.replacePhotos || '').toLowerCase() === 'true';
 
-    let merged = isReplace ? [] : current;
+    let merged = isReplace ? [] : currentFotoList;
     merged = [...merged, ...fromBodyArr, ...fromBodySingle, ...uploaded];
 
-    // de‑dupe sambil preserve order
+    // dedupe
     const seen = new Set();
     const finalList = merged.filter(p => (p && !seen.has(p) && seen.add(p)));
+    const finalFotoForDb = finalList.length ? finalList.join(';') : null;
 
-    const result = await pool.request()
+    // cek perubahan data alat (tanpa menyentuh 3 kolom yang dibatasi)
+    const old = cur.recordset[0];
+    const hasChanged =
+      String(old.Kode) !== String(Kode) ||
+      Number(old.JenisId) !== Number(JenisId) ||
+      Number(old.LokasiId) !== Number(LokasiId) ||
+      String(old.Spesifikasi || '') !== String(Spesifikasi || '') ||
+      String(old.FotoPath || '') !== String(finalFotoForDb || '') ||
+      String(old.exp_date || '') !== String(body.exp_date || '');
+
+    // siapkan parameter umum
+    const reqBase = pool.request()
       .input('id', sql.Int, idParam)
       .input('Kode', sql.NVarChar, Kode)
       .input('JenisId', sql.Int, JenisId)
       .input('LokasiId', sql.Int, LokasiId)
       .input('Spesifikasi', sql.NVarChar, Spesifikasi)
-      .input('FotoPath', sql.NVarChar, finalList.length ? joinPaths(finalList) : null)
-      .query(`
-        UPDATE Peralatan 
-        SET Kode = @Kode, JenisId = @JenisId, LokasiId = @LokasiId, Spesifikasi = @Spesifikasi, FotoPath = @FotoPath
+      .input('FotoPath', sql.NVarChar, finalFotoForDb)
+      .input('ExpDate', sql.Date, body.exp_date || null);
+
+    // kalau ada perubahan data alat → izinkan update status/tanggal/keterangan
+    if (hasChanged) {
+      reqBase
+        .input('StatusNew', sql.NVarChar(50), body.status || 'Diupdate')  // default: “Diupdate”
+        .input('KetNew', sql.NVarChar(sql.MAX), body.keterangan || null);
+
+      const result = await reqBase.query(`
+        UPDATE Peralatan
+        SET Kode = @Kode,
+            JenisId = @JenisId,
+            LokasiId = @LokasiId,
+            Spesifikasi = @Spesifikasi,
+            FotoPath = @FotoPath,
+            exp_date = @ExpDate,
+            -- hanya ketika ada perubahan data:
+            status = @StatusNew,
+            tanggal_update_alat = GETDATE(),
+            keterangan = @KetNew
         WHERE Id = @id
       `);
 
-    if (result.rowsAffected[0] === 0) return res.status(404).json({ message: 'Peralatan tidak ditemukan' });
+      if (result.rowsAffected[0] === 0) return res.status(404).json({ message: 'Peralatan tidak ditemukan' });
+    } else {
+      // tidak ada perubahan → tiga kolom tidak disentuh
+      const result = await reqBase.query(`
+        UPDATE Peralatan
+        SET Kode = @Kode,
+            JenisId = @JenisId,
+            LokasiId = @LokasiId,
+            Spesifikasi = @Spesifikasi,
+            FotoPath = @FotoPath,
+            exp_date = @ExpDate
+        WHERE Id = @id
+      `);
+
+      if (result.rowsAffected[0] === 0) return res.status(404).json({ message: 'Peralatan tidak ditemukan' });
+    }
 
     res.json({
-      message: 'Peralatan berhasil diupdate',
+      message: hasChanged ? 'Peralatan diupdate (dengan status & timestamp)' : 'Peralatan diupdate (tanpa perubahan status)',
       fotoPaths: finalList,
-      fotoUrls: toAbsoluteUrls(req, finalList)
+      fotoUrls: toAbsoluteUrls(req, finalList),
+      changed: hasChanged
     });
   } catch (err) {
     console.error('❌ Error update peralatan:', err);
     res.status(500).json({ message: 'Gagal update peralatan', error: err.message });
   }
 });
+
 
 /* ==========================================
    ROUTE 7: Delete peralatan (WEB ADMIN)
