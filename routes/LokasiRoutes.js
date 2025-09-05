@@ -507,5 +507,69 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ message: 'Gagal menghapus lokasi' });
   }
 });
+// ===========================================
+// ====== (BARU) Debug/Helper: mode badge =====
+// ===========================================
+// Non-breaking helper untuk cek cepat apakah badge eligible offline.
+// Tidak wajib dipakai aplikasi; aman dibiarkan.
+router.get('/by-badge/:badge/mode', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const { badge } = req.params;
+
+    const q = await pool.request()
+      .input('badge', sql.NVarChar, badge)
+      .query(`
+        SELECT
+          p.Id,
+          p.BadgeNumber,
+          p.RolePetugasId,
+          rp.NamaRole,
+          p.LokasiId,
+          l.Nama AS LokasiNama,
+          p.IntervalPetugasId,
+          i.NamaInterval,
+          i.Bulan AS IntervalBulan
+        FROM Petugas p
+        LEFT JOIN RolePetugas     rp ON rp.Id = p.RolePetugasId
+        LEFT JOIN Lokasi           l ON l.Id = p.LokasiId
+        LEFT JOIN IntervalPetugas  i ON i.Id = p.IntervalPetugasId
+        WHERE p.BadgeNumber = @badge;
+      `);
+
+    if (!q.recordset.length) {
+      return res.status(404).json({ message: 'Petugas dengan badge tersebut tidak ditemukan' });
+    }
+
+    const row = q.recordset[0];
+    const roleName = (row.NamaRole || '').toLowerCase();
+    const isRescue = roleName.includes('rescue'); // konsisten dgn aturan app kamu
+
+    // Rule dari konteks proyek:
+    // - Jika role = rescue → offline/online OK (akses penuh)
+    // - Jika role ≠ rescue:
+    //     - bila LokasiId terisi → offline/online OK (dibatasi lokasi)
+    //     - bila LokasiId null → online only
+    const offlineAllowed = isRescue || (!!row.LokasiId);
+
+    res.json({
+      badge: row.BadgeNumber,
+      role: row.NamaRole,
+      lokasiId: row.LokasiId,
+      lokasiNama: row.LokasiNama || null,
+      intervalId: row.IntervalPetugasId || null,
+      intervalNama: row.NamaInterval || null,
+      intervalBulan: row.IntervalBulan || null,
+      mode: offlineAllowed ? 'offline-online' : 'online-only',
+      reason: offlineAllowed
+        ? (isRescue ? 'Role rescue' : 'Petugas memiliki LokasiId')
+        : 'Petugas belum ter-assign ke lokasi (LokasiId NULL)',
+    });
+  } catch (err) {
+    console.error('Error resolve badge mode:', err);
+    res.status(500).json({ message: 'Gagal mengecek mode badge' });
+  }
+});
+
 
 module.exports = router;

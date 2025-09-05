@@ -105,8 +105,13 @@ LEFT JOIN LastCheck lc ON lc.PeralatanId = a.Id AND lc.rn = 1
 LEFT JOIN InspeksiBlnIni ib ON ib.BadgeNumber = @badge
 JOIN JenisPeralatan j ON a.JenisId = j.Id
 JOIN Lokasi l ON a.LokasiId = l.Id
-WHERE a.LokasiId = pi.PetugasLokasiId
-   OR a.LokasiId IN (SELECT Id FROM Lokasi WHERE PIC_PetugasId = pi.PetugasId)
+WHERE
+  -- cakupan lokasi
+  (a.LokasiId = pi.PetugasLokasiId
+   OR a.LokasiId IN (SELECT Id FROM Lokasi WHERE PIC_PetugasId = pi.PetugasId))
+  -- ⛔ exclude alat EXP atau sudah kadaluarsa
+  AND (a.status IS NULL OR UPPER(LTRIM(RTRIM(a.status))) <> 'EXP')
+  AND (a.exp_date IS NULL OR CAST(a.exp_date AS DATE) >= CAST(GETDATE() AS DATE))
 ORDER BY a.Kode;
       `);
 
@@ -116,6 +121,7 @@ ORDER BY a.Kode;
     res.status(500).json({ message: 'Gagal load peralatan' });
   }
 });
+
 
 
 /* ==================================
@@ -168,6 +174,13 @@ WITH PetugasInfo AS (
   LEFT JOIN IntervalPetugas ip ON ip.Id = rp.IntervalPetugasId
   WHERE LTRIM(RTRIM(UPPER(p.BadgeNumber))) = @badge
 ),
+ActivePeralatan AS (  -- hanya alat aktif
+  SELECT *
+  FROM Peralatan p
+  WHERE p.Id = @id
+    AND (p.status IS NULL OR UPPER(LTRIM(RTRIM(p.status))) <> 'EXP')
+    AND (p.exp_date IS NULL OR CAST(p.exp_date AS DATE) >= CAST(GETDATE() AS DATE))
+),
 LastInspection AS (
   SELECT PeralatanId, MAX(TanggalPemeriksaan) AS LastDate
   FROM HasilPemeriksaan
@@ -179,21 +192,15 @@ SELECT
   p.Kode                      AS no_apar,
   l.Nama                      AS lokasi_apar,
   jp.Nama                     AS jenis_apar,
-
-  -- interval dari ROLE
   pi.IntervalPetugasId        AS intervalPetugasId,
   pi.NamaIntervalPetugas      AS namaIntervalPetugas,
   pi.BulanIntervalPetugas     AS bulanIntervalPetugas,
-
-  -- interval default
   jp.IntervalPemeriksaanBulan AS defaultIntervalBulan,
-
   li.LastDate                 AS last_inspection_date,
   CASE
     WHEN li.LastDate IS NULL THEN NULL
     ELSE DATEADD(MONTH, COALESCE(pi.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan), li.LastDate)
   END                         AS nextDueDate,
-
   COALESCE(pi.BulanIntervalPetugas, jp.IntervalPemeriksaanBulan) AS effectiveIntervalBulan,
   DATEDIFF(DAY, GETDATE(),
            CASE WHEN li.LastDate IS NULL THEN GETDATE()
@@ -206,7 +213,6 @@ SELECT
        ) <= @earlyWindow THEN 1
     ELSE 0
   END                         AS canInspect,
-
   (
     SELECT JSON_QUERY('[' +
       STRING_AGG(
@@ -217,21 +223,24 @@ SELECT
     FROM Checklist c
     WHERE c.JenisId = p.JenisId
   )                           AS keperluan_check
-FROM Peralatan p
+FROM ActivePeralatan p
 JOIN JenisPeralatan jp ON p.JenisId = jp.Id
 JOIN Lokasi l          ON p.LokasiId = l.Id
 CROSS JOIN PetugasInfo pi
-LEFT JOIN LastInspection li ON p.Id = li.PeralatanId
-WHERE p.Id = @id;
+LEFT JOIN LastInspection li ON p.Id = li.PeralatanId;
       `);
 
-    if (!result.recordset.length) return res.status(404).json({ message: 'Peralatan tidak ditemukan' });
+    if (!result.recordset.length) {
+      // alat EXP/expired juga akan jatuh ke sini
+      return res.status(404).json({ message: 'Peralatan tidak ditemukan atau tidak aktif' });
+    }
     res.json(result.recordset[0]);
   } catch (err) {
     console.error('🔥 SQL Error (with-checklist):', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 // ==========================================
 // ROUTE 3: List peralatan (WEB ADMIN)
@@ -305,6 +314,8 @@ router.get('/tokens-by-badge/:badge', async (req, res) => {
         LEFT JOIN Lokasi l ON l.Id = per.LokasiId
         LEFT JOIN JenisPeralatan jp ON jp.Id = per.JenisId
         WHERE LTRIM(RTRIM(p.BadgeNumber)) = LTRIM(RTRIM(@badge))
+          AND (per.status IS NULL OR UPPER(LTRIM(RTRIM(per.status))) <> 'EXP')
+          AND (per.exp_date IS NULL OR CAST(per.exp_date AS DATE) >= CAST(GETDATE() AS DATE))
         ORDER BY per.Id ASC;
       `);
 
@@ -314,6 +325,7 @@ router.get('/tokens-by-badge/:badge', async (req, res) => {
     return res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 
 
@@ -779,7 +791,7 @@ router.get('/offline/manifest', async (req, res) => {
       .input('jenisId',  sql.Int, jenisId  || 0)
       .input('petLok',   sql.Int, petLokId || 0)
       .input('badge',    sql.NVarChar, badge)
-      .query(`
+        .query(`
 DECLARE @TodayPlus DATE = CAST(DATEADD(DAY, @days, GETDATE()) AS DATE);
 
 WITH ScopeLokasi AS (
@@ -813,7 +825,10 @@ Filtered AS (
     WHERE hp.PeralatanId = p.Id
   ) li
   WHERE
-    (@jenisId = 0 OR p.JenisId = @jenisId)
+    -- ⛔ hanya alat aktif
+    (p.status IS NULL OR UPPER(LTRIM(RTRIM(p.status))) <> 'EXP')
+    AND (p.exp_date IS NULL OR CAST(p.exp_date AS DATE) >= CAST(GETDATE() AS DATE))
+    AND (@jenisId = 0 OR p.JenisId = @jenisId)
     AND (@lokasiId = 0 OR p.LokasiId = @lokasiId)
     AND (
       @badge = '' OR
@@ -841,7 +856,8 @@ FROM (
 ) z
 ORDER BY z.kode
 OFFSET ${offset} ROWS FETCH NEXT ${pageSize} ROWS ONLY;
-      `);
+  `);
+
 
     res.json(q.recordset || []);
   } catch (err) {
@@ -864,7 +880,6 @@ router.post('/offline/details', async (req, res) => {
   try {
     const pool = await poolPromise;
     const tokens = Array.isArray(req.body?.tokens) ? req.body.tokens : [];
-
     if (!tokens.length) return res.json([]);
 
     const jsonTokens = JSON.stringify(tokens.map(String));
@@ -882,6 +897,8 @@ WITH Target AS (
   SELECT p.Id, p.Kode, p.TokenQR, p.JenisId, p.LokasiId
   FROM Peralatan p
   WHERE p.TokenQR IN (SELECT Token FROM @t)
+    AND (p.status IS NULL OR UPPER(LTRIM(RTRIM(p.status))) <> 'EXP')
+    AND (p.exp_date IS NULL OR CAST(p.exp_date AS DATE) >= CAST(GETDATE() AS DATE))
 ),
 LastInspect AS (
   SELECT hp.PeralatanId, MAX(hp.TanggalPemeriksaan) AS LastDate
@@ -920,7 +937,6 @@ LEFT JOIN LastInspect li ON li.PeralatanId = tg.Id
 ORDER BY tg.Kode ASC;
       `);
 
-    // Kembalikan sebagai array obyek
     const rows = (r.recordset || []).map(row => {
       let checklist = [];
       try { checklist = JSON.parse(row.checklist || '[]'); } catch(_) {}
@@ -933,6 +949,7 @@ ORDER BY tg.Kode ASC;
     res.status(500).json({ message: 'Server error' });
   }
 });
+
 
 
 /* ===============================================================
