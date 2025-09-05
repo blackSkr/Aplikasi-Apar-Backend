@@ -19,7 +19,7 @@ function shapeLokasiRow(row) {
   return {
     Id:              row.Id,
     Nama:            row.Nama,
-    DetailNamaLokasi: row.DetailNamaLokasi || null, // ✅ kirim camelCase nyaman
+    DetailNamaLokasi: row.DetailNamaLokasi || null,
     lat:             row.lat,
     long:            row.long,
     PICPetugasId:    row.PICPetugasId,
@@ -36,7 +36,7 @@ async function getLokasiById(pool, id) {
       SELECT
         l.Id,
         l.Nama,
-        l.[detail_nama_lokasi] AS DetailNamaLokasi, -- ✅ ambil kolom baru
+        l.[detail_nama_lokasi] AS DetailNamaLokasi,
         l.lat,
         l.long,
         l.PIC_PetugasId AS PICPetugasId,
@@ -104,7 +104,7 @@ router.get('/', async (_req, res) => {
       SELECT
         l.Id,
         l.Nama,
-        l.[detail_nama_lokasi] AS DetailNamaLokasi, -- ✅
+        l.[detail_nama_lokasi] AS DetailNamaLokasi,
         l.lat,
         l.long,
         l.PIC_PetugasId AS PICPetugasId,
@@ -160,18 +160,7 @@ router.get('/form-meta', async (_req, res) => {
   }
 });
 
-router.get('/:id', async (req, res) => {
-  try {
-    const pool = await poolPromise;
-    const lokasi = await getLokasiById(pool, req.params.id);
-    if (!lokasi) return res.status(404).json({ message: 'Lokasi tidak ditemukan' });
-    res.json(lokasi);
-  } catch (err) {
-    console.error('Error fetch lokasi by ID:', err);
-    res.status(500).json({ message: 'Gagal mengambil data lokasi' });
-  }
-});
-
+// PENTING: definisikan yang spesifik dulu sebelum "/:id"
 router.get('/:id/petugas', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -185,11 +174,22 @@ router.get('/:id/petugas', async (req, res) => {
   }
 });
 
+router.get('/:id', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const lokasi = await getLokasiById(pool, req.params.id);
+    if (!lokasi) return res.status(404).json({ message: 'Lokasi tidak ditemukan' });
+    res.json(lokasi);
+  } catch (err) {
+    console.error('Error fetch lokasi by ID:', err);
+    res.status(500).json({ message: 'Gagal mengambil data lokasi' });
+  }
+});
+
 // =============== POST ===============
 /**
  * POST /api/lokasi
- * Body:
- *  { nama, detailNamaLokasi?, lat, long, picPetugasId?, petugas?: [...] }
+ * Body: { nama, detailNamaLokasi?, lat, long, picPetugasId?, petugas?: [...] }
  */
 router.post('/', async (req, res) => {
   const pool = await poolPromise;
@@ -208,7 +208,7 @@ router.post('/', async (req, res) => {
     await transaction.begin();
     const rq = new sql.Request(transaction);
 
-    // 1) Insert Lokasi → simpan ke kolom [detail_nama_lokasi]
+    // 1) Insert Lokasi
     const ins = await rq
       .input('Nama',                sql.NVarChar,       nama)
       .input('detail_nama_lokasi', sql.NVarChar,       detail)
@@ -224,7 +224,7 @@ router.post('/', async (req, res) => {
 
     let selectedPICId = picPetugasId || null;
 
-    // 2) Petugas (tidak diubah)
+    // 2) Optional: daftar petugas
     if (Array.isArray(petugas) && petugas.length) {
       for (const raw of petugas) {
         if (raw && raw.petugasId) {
@@ -263,7 +263,7 @@ router.post('/', async (req, res) => {
       }
     }
 
-    // 3) Atur PIC bila perlu + sinkron LokasiId
+    // 3) Set PIC bila perlu + pastikan LokasiId terisi
     if (selectedPICId && selectedPICId !== picPetugasId) {
       await rq.input('id', sql.Int, lokasiId).input('pic', sql.Int, selectedPICId)
         .query(`UPDATE Lokasi SET PIC_PetugasId = @pic WHERE Id = @id;`);
@@ -310,7 +310,7 @@ router.put('/:id', async (req, res) => {
     await transaction.begin();
     const rq = new sql.Request(transaction);
 
-    // 1) Update kolom dasar (termasuk detail_nama_lokasi)
+    // 1) Update kolom dasar
     await rq
       .input('id',                 sql.Int,            id)
       .input('Nama',               sql.NVarChar,       nama)
@@ -330,7 +330,7 @@ router.put('/:id', async (req, res) => {
 
     let selectedPICId = picPetugasId || null;
 
-    // 2) Tambahkan assignment petugas (opsional)
+    // 2) Optional: assignment petugas
     if (Array.isArray(petugas) && petugas.length) {
       for (const raw of petugas) {
         if (raw && raw.petugasId) {
@@ -390,7 +390,7 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// =============== Relasi Petugas & Delete (tetap) ===============
+// =============== Relasi Petugas (endpoint LAMA – tetap) ===============
 router.post('/:id/petugas', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -457,6 +457,48 @@ router.post('/:id/petugas', async (req, res) => {
   }
 });
 
+// =============== (BARU) Sesuai FE ASP.NET ===============
+// POST /api/lokasi/:lokasiId/petugas/:petugasId?asPIC=true|false
+router.post('/:lokasiId/petugas/:petugasId', async (req, res) => {
+  try {
+    const pool = await poolPromise;
+    const { lokasiId, petugasId } = req.params;
+    const asPIC = String(req.query.asPIC ?? 'false').toLowerCase() === 'true';
+
+    const lokasi = await getLokasiById(pool, lokasiId);
+    if (!lokasi) return res.status(404).json({ message: 'Lokasi tidak ditemukan' });
+
+    await pool.request()
+      .input('petugasId', sql.Int, petugasId)
+      .input('lokasiId',  sql.Int, lokasiId)
+      .query(`UPDATE Petugas SET LokasiId = @lokasiId WHERE Id = @petugasId;`);
+
+    if (asPIC) {
+      await pool.request()
+        .input('id',  sql.Int, lokasiId)
+        .input('pic', sql.Int, petugasId)
+        .query(`UPDATE Lokasi SET PIC_PetugasId = @pic WHERE Id = @id;`);
+    }
+
+    // pastikan PIC (jika ada) tetap assigned ke lokasi
+    const refreshed = await getLokasiById(pool, lokasiId);
+    if (refreshed?.PICPetugasId) {
+      await pool.request()
+        .input('lokasiId', sql.Int, lokasiId)
+        .input('pid',      sql.Int, refreshed.PICPetugasId)
+        .query(`UPDATE Petugas SET LokasiId = @lokasiId WHERE Id = @pid;`);
+    }
+
+    const items = await listPetugasInLokasi(pool, lokasiId);
+    res.status(201).json({ lokasi: refreshed, items });
+
+  } catch (err) {
+    console.error('Error FE AddPetugas (route baru):', err);
+    res.status(500).json({ message: 'Gagal menautkan petugas ke lokasi' });
+  }
+});
+
+// =============== DELETE relasi & lokasi ===============
 router.delete('/:id/petugas/:petugasId', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -507,11 +549,10 @@ router.delete('/:id', async (req, res) => {
     res.status(500).json({ message: 'Gagal menghapus lokasi' });
   }
 });
+
 // ===========================================
-// ====== (BARU) Debug/Helper: mode badge =====
+// ====== (Opsional) Debug/Helper: mode badge =
 // ===========================================
-// Non-breaking helper untuk cek cepat apakah badge eligible offline.
-// Tidak wajib dipakai aplikasi; aman dibiarkan.
 router.get('/by-badge/:badge/mode', async (req, res) => {
   try {
     const pool = await poolPromise;
@@ -543,13 +584,8 @@ router.get('/by-badge/:badge/mode', async (req, res) => {
 
     const row = q.recordset[0];
     const roleName = (row.NamaRole || '').toLowerCase();
-    const isRescue = roleName.includes('rescue'); // konsisten dgn aturan app kamu
+    const isRescue = roleName.includes('rescue');
 
-    // Rule dari konteks proyek:
-    // - Jika role = rescue → offline/online OK (akses penuh)
-    // - Jika role ≠ rescue:
-    //     - bila LokasiId terisi → offline/online OK (dibatasi lokasi)
-    //     - bila LokasiId null → online only
     const offlineAllowed = isRescue || (!!row.LokasiId);
 
     res.json({
@@ -570,6 +606,5 @@ router.get('/by-badge/:badge/mode', async (req, res) => {
     res.status(500).json({ message: 'Gagal mengecek mode badge' });
   }
 });
-
 
 module.exports = router;
